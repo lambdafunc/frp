@@ -33,9 +33,11 @@ func NewMockServers(portAllocator *port.Allocator) *MockServers {
 	httpPort := portAllocator.Get()
 	s.tcpEchoServer = streamserver.New(streamserver.TCP, streamserver.WithBindPort(tcpPort))
 	s.udpEchoServer = streamserver.New(streamserver.UDP, streamserver.WithBindPort(udpPort))
-	s.httpSimpleServer = httpserver.New(httpserver.WithBindPort(httpPort), httpserver.WithHandler(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		w.Write([]byte(consts.TestString))
-	})))
+	s.httpSimpleServer = httpserver.New(httpserver.WithBindPort(httpPort),
+		httpserver.WithHandler(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			_, _ = w.Write([]byte(consts.TestString))
+		})),
+	)
 
 	udsIndex := portAllocator.Get()
 	udsAddr := fmt.Sprintf("%s/frp_echo_server_%d.sock", os.TempDir(), udsIndex)
@@ -54,10 +56,7 @@ func (m *MockServers) Run() error {
 	if err := m.udsEchoServer.Run(); err != nil {
 		return err
 	}
-	if err := m.httpSimpleServer.Run(); err != nil {
-		return err
-	}
-	return nil
+	return m.httpSimpleServer.Run()
 }
 
 func (m *MockServers) Close() {
@@ -68,8 +67,8 @@ func (m *MockServers) Close() {
 	os.Remove(m.udsEchoServer.BindAddr())
 }
 
-func (m *MockServers) GetTemplateParams() map[string]interface{} {
-	ret := make(map[string]interface{})
+func (m *MockServers) GetTemplateParams() map[string]any {
+	ret := make(map[string]any)
 	ret[TCPEchoServerPort] = m.tcpEchoServer.BindPort()
 	ret[UDPEchoServerPort] = m.udpEchoServer.BindPort()
 	ret[UDSEchoServerAddr] = m.udsEchoServer.BindAddr()
@@ -77,7 +76,7 @@ func (m *MockServers) GetTemplateParams() map[string]interface{} {
 	return ret
 }
 
-func (m *MockServers) GetParam(key string) interface{} {
+func (m *MockServers) GetParam(key string) any {
 	params := m.GetTemplateParams()
 	if v, ok := params[key]; ok {
 		return v

@@ -1,43 +1,53 @@
 package vhost
 
 import (
+	"cmp"
 	"errors"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 )
 
-var (
-	ErrRouterConfigConflict = errors.New("router config conflict")
-)
+var ErrRouterConfigConflict = errors.New("router config conflict")
+
+type routerByHTTPUser map[string][]*Router
 
 type Routers struct {
-	RouterByDomain map[string][]*Router
-	mutex          sync.RWMutex
+	indexByDomain map[string]routerByHTTPUser
+
+	mutex sync.RWMutex
 }
 
 type Router struct {
 	domain   string
 	location string
+	httpUser string
 
-	payload interface{}
+	// store any object here
+	payload any
 }
 
 func NewRouters() *Routers {
 	return &Routers{
-		RouterByDomain: make(map[string][]*Router),
+		indexByDomain: make(map[string]routerByHTTPUser),
 	}
 }
 
-func (r *Routers) Add(domain, location string, payload interface{}) error {
+func (r *Routers) Add(domain, location, httpUser string, payload any) error {
+	domain = strings.ToLower(domain)
+
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 
-	if _, exist := r.exist(domain, location); exist {
+	if _, exist := r.exist(domain, location, httpUser); exist {
 		return ErrRouterConfigConflict
 	}
 
-	vrs, found := r.RouterByDomain[domain]
+	routersByHTTPUser, found := r.indexByDomain[domain]
+	if !found {
+		routersByHTTPUser = make(map[string][]*Router)
+	}
+	vrs, found := routersByHTTPUser[httpUser]
 	if !found {
 		vrs = make([]*Router, 0, 1)
 	}
@@ -45,20 +55,32 @@ func (r *Routers) Add(domain, location string, payload interface{}) error {
 	vr := &Router{
 		domain:   domain,
 		location: location,
+		httpUser: httpUser,
 		payload:  payload,
 	}
 	vrs = append(vrs, vr)
 
-	sort.Sort(sort.Reverse(ByLocation(vrs)))
-	r.RouterByDomain[domain] = vrs
+	slices.SortFunc(vrs, func(a, b *Router) int {
+		return -cmp.Compare(a.location, b.location)
+	})
+
+	routersByHTTPUser[httpUser] = vrs
+	r.indexByDomain[domain] = routersByHTTPUser
 	return nil
 }
 
-func (r *Routers) Del(domain, location string) {
+func (r *Routers) Del(domain, location, httpUser string) {
+	domain = strings.ToLower(domain)
+
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 
-	vrs, found := r.RouterByDomain[domain]
+	routersByHTTPUser, found := r.indexByDomain[domain]
+	if !found {
+		return
+	}
+
+	vrs, found := routersByHTTPUser[httpUser]
 	if !found {
 		return
 	}
@@ -68,52 +90,47 @@ func (r *Routers) Del(domain, location string) {
 			newVrs = append(newVrs, vr)
 		}
 	}
-	r.RouterByDomain[domain] = newVrs
+	routersByHTTPUser[httpUser] = newVrs
 }
 
-func (r *Routers) Get(host, path string) (vr *Router, exist bool) {
+func (r *Routers) Get(host, path, httpUser string) (vr *Router, exist bool) {
+	host = strings.ToLower(host)
+
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 
-	vrs, found := r.RouterByDomain[host]
+	routersByHTTPUser, found := r.indexByDomain[host]
 	if !found {
 		return
 	}
 
-	// can't support load balance, will to do
+	vrs, found := routersByHTTPUser[httpUser]
+	if !found {
+		return
+	}
+
 	for _, vr = range vrs {
 		if strings.HasPrefix(path, vr.location) {
 			return vr, true
 		}
 	}
-
 	return
 }
 
-func (r *Routers) exist(host, path string) (vr *Router, exist bool) {
-	vrs, found := r.RouterByDomain[host]
+func (r *Routers) exist(host, path, httpUser string) (route *Router, exist bool) {
+	routersByHTTPUser, found := r.indexByDomain[host]
+	if !found {
+		return
+	}
+	routers, found := routersByHTTPUser[httpUser]
 	if !found {
 		return
 	}
 
-	for _, vr = range vrs {
-		if path == vr.location {
-			return vr, true
+	for _, route = range routers {
+		if path == route.location {
+			return route, true
 		}
 	}
-
 	return
-}
-
-// sort by location
-type ByLocation []*Router
-
-func (a ByLocation) Len() int {
-	return len(a)
-}
-func (a ByLocation) Swap(i, j int) {
-	a[i], a[j] = a[j], a[i]
-}
-func (a ByLocation) Less(i, j int) bool {
-	return strings.Compare(a[i].location, a[j].location) < 0
 }

@@ -15,18 +15,12 @@
 package main
 
 import (
-	"math/rand"
-	"time"
-
 	_ "github.com/fatedier/frp/assets/frpc"
 	"github.com/fatedier/frp/cmd/frpc/sub"
-
-	"github.com/fatedier/golib/crypto"
+	"github.com/fatedier/frp/pkg/util/system"
 )
 
 func main() {
-	crypto.DefaultSalt = "frp"
-	rand.Seed(time.Now().UnixNano())
-
+	system.EnableCompatibilityMode()
 	sub.Execute()
 }

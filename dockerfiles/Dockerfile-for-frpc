@@ -1,14 +1,14 @@
-FROM alpine:3 AS temp
+FROM golang:1.23 AS building
 
-COPY bin/frpc /tmp
+COPY . /building
+WORKDIR /building
 
-RUN chmod -R 777 /tmp/frpc
-
+RUN make frpc
 
 FROM alpine:3
 
-WORKDIR /app
+RUN apk add --no-cache tzdata
 
-COPY --from=temp /tmp/frpc /usr/bin
+COPY --from=building /building/bin/frpc /usr/bin/frpc
 
 ENTRYPOINT ["/usr/bin/frpc"]

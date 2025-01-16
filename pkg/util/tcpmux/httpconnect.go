@@ -22,20 +22,31 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/fatedier/frp/pkg/util/util"
+	libnet "github.com/fatedier/golib/net"
+
+	httppkg "github.com/fatedier/frp/pkg/util/http"
 	"github.com/fatedier/frp/pkg/util/vhost"
 )
 
 type HTTPConnectTCPMuxer struct {
 	*vhost.Muxer
+
+	// If passthrough is set to true, the CONNECT request will be forwarded to the backend service.
+	// Otherwise, it will return an OK response to the client and forward the remaining content to the backend service.
+	passthrough bool
 }
 
-func NewHTTPConnectTCPMuxer(listener net.Listener, timeout time.Duration) (*HTTPConnectTCPMuxer, error) {
-	mux, err := vhost.NewMuxer(listener, getHostFromHTTPConnect, nil, sendHTTPOk, nil, timeout)
-	return &HTTPConnectTCPMuxer{mux}, err
+func NewHTTPConnectTCPMuxer(listener net.Listener, passthrough bool, timeout time.Duration) (*HTTPConnectTCPMuxer, error) {
+	ret := &HTTPConnectTCPMuxer{passthrough: passthrough}
+	mux, err := vhost.NewMuxer(listener, ret.getHostFromHTTPConnect, timeout)
+	mux.SetCheckAuthFunc(ret.auth).
+		SetSuccessHookFunc(ret.sendConnectResponse).
+		SetFailHookFunc(vhostFailed)
+	ret.Muxer = mux
+	return ret, err
 }
 
-func readHTTPConnectRequest(rd io.Reader) (host string, err error) {
+func (muxer *HTTPConnectTCPMuxer) readHTTPConnectRequest(rd io.Reader) (host, httpUser, httpPwd string, err error) {
 	bufioReader := bufio.NewReader(rd)
 
 	req, err := http.ReadRequest(bufioReader)
@@ -48,21 +59,66 @@ func readHTTPConnectRequest(rd io.Reader) (host string, err error) {
 		return
 	}
 
-	host, _ = util.CanonicalHost(req.Host)
+	host, _ = httppkg.CanonicalHost(req.Host)
+	proxyAuth := req.Header.Get("Proxy-Authorization")
+	if proxyAuth != "" {
+		httpUser, httpPwd, _ = httppkg.ParseBasicAuth(proxyAuth)
+	}
 	return
 }
 
-func sendHTTPOk(c net.Conn) error {
-	return util.OkResponse().Write(c)
+func (muxer *HTTPConnectTCPMuxer) sendConnectResponse(c net.Conn, _ map[string]string) error {
+	if muxer.passthrough {
+		return nil
+	}
+	res := httppkg.OkResponse()
+	if res.Body != nil {
+		defer res.Body.Close()
+	}
+	return res.Write(c)
 }
 
-func getHostFromHTTPConnect(c net.Conn) (_ net.Conn, _ map[string]string, err error) {
+func (muxer *HTTPConnectTCPMuxer) auth(c net.Conn, username, password string, reqInfo map[string]string) (bool, error) {
+	reqUsername := reqInfo["HTTPUser"]
+	reqPassword := reqInfo["HTTPPwd"]
+	if username == reqUsername && password == reqPassword {
+		return true, nil
+	}
+
+	resp := httppkg.ProxyUnauthorizedResponse()
+	if resp.Body != nil {
+		defer resp.Body.Close()
+	}
+	_ = resp.Write(c)
+	return false, nil
+}
+
+func vhostFailed(c net.Conn) {
+	res := vhost.NotFoundResponse()
+	if res.Body != nil {
+		defer res.Body.Close()
+	}
+	_ = res.Write(c)
+	_ = c.Close()
+}
+
+func (muxer *HTTPConnectTCPMuxer) getHostFromHTTPConnect(c net.Conn) (net.Conn, map[string]string, error) {
 	reqInfoMap := make(map[string]string, 0)
-	host, err := readHTTPConnectRequest(c)
+	sc, rd := libnet.NewSharedConn(c)
+
+	host, httpUser, httpPwd, err := muxer.readHTTPConnectRequest(rd)
 	if err != nil {
 		return nil, reqInfoMap, err
 	}
+
 	reqInfoMap["Host"] = host
 	reqInfoMap["Scheme"] = "tcp"
-	return c, reqInfoMap, nil
+	reqInfoMap["HTTPUser"] = httpUser
+	reqInfoMap["HTTPPwd"] = httpPwd
+
+	outConn := c
+	if muxer.passthrough {
+		outConn = sc
+	}
+	return outConn, reqInfoMap, nil
 }
